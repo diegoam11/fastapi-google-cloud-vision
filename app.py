@@ -1,200 +1,235 @@
-from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import JSONResponse
+import os
+from fastapi import FastAPI, UploadFile, File
 from google.cloud import vision
-from google.oauth2 import service_account
+from data import marcas_modelos as marcas_modelos_data
 import io
+import re
+from datetime import datetime
 
 CREDENTIALS_PATH = "gothic-isotope-460019-b8-cfcab02a3d9a.json"
-
-credentials = service_account.Credentials.from_service_account_file(CREDENTIALS_PATH)
-client = vision.ImageAnnotatorClient(credentials=credentials)
-
-def extract_car_features(labels, objects):
-    car_info = {
-        "brand": None,
-        "model": None,
-        "approximate_year": None,
-        "color": None,
-        "type": None,
-        "style": None,
-        "distinctive_features": []
-    }
-    
-    brands = [
-        "Toyota", "Honda", "Ford", "BMW", "Mercedes", "Audi", "Volkswagen", "Nissan", 
-        "Chevrolet", "Hyundai", "Kia", "Lexus", "Porsche", "Ferrari", "Lamborghini",
-        "Maserati", "Jaguar", "Land Rover", "Subaru", "Mazda", "Volvo", "Tesla"
-    ]
-    
-    color_map = {
-        "red": "red", 
-        "blue": "blue", 
-        "black": "black", 
-        "white": "white",
-        "silver": "silver", 
-        "gray": "gray", 
-        "yellow": "yellow", 
-        "green": "green",
-        "burgundy": "burgundy", 
-        "purple": "purple", 
-        "orange": "orange", 
-        "brown": "brown",
-        "gold": "gold", 
-        "beige": "beige"
-    }
-    
-    for label in labels:
-        desc = label.description.lower()
-        
-        for brand in brands:
-            if brand.lower() in desc and label.score > 0.7:
-                car_info["brand"] = brand
-                break
-        
-        for eng_color, color in color_map.items():
-            if eng_color in desc and label.score > 0.7:
-                car_info["color"] = color
-                break
-        
-        if ("suv" in desc or "crossover" in desc) and car_info["type"] is None:
-            car_info["type"] = "SUV"
-        elif "sedan" in desc and car_info["type"] is None:
-            car_info["type"] = "Sedan"
-        elif ("sports car" in desc or "sport car" in desc) and car_info["type"] is None:
-            car_info["type"] = "Sports Car"
-        elif ("coupe" in desc or "coupé" in desc) and car_info["type"] is None:
-            car_info["type"] = "Coupe"
-        elif ("pickup" in desc or "truck" in desc) and car_info["type"] is None:
-            car_info["type"] = "Pickup Truck"
-        elif "hatchback" in desc and car_info["type"] is None:
-            car_info["type"] = "Hatchback"
-        elif "convertible" in desc and car_info["type"] is None:
-            car_info["type"] = "Convertible"
-        elif "van" in desc and car_info["type"] is None:
-            car_info["type"] = "Van"
-        
-        if "luxury" in desc or "premium" in desc and car_info["style"] is None:
-            car_info["style"] = "Luxury"
-        elif "sport" in desc and "sports car" not in desc and car_info["style"] is None:
-            car_info["style"] = "Sporty"
-        elif "classic" in desc and car_info["style"] is None:
-            car_info["style"] = "Classic"
-        elif "vintage" in desc and car_info["style"] is None:
-            car_info["style"] = "Vintage"
-        elif "modern" in desc and car_info["style"] is None:
-            car_info["style"] = "Modern"
-        
-        if label.score > 0.7:
-            if "convertible" in desc and "convertible" not in car_info["distinctive_features"]:
-                car_info["distinctive_features"].append("convertible")
-            elif "sunroof" in desc and "sunroof" not in car_info["distinctive_features"]:
-                car_info["distinctive_features"].append("sunroof")
-            elif "spoiler" in desc and "spoiler" not in car_info["distinctive_features"]:
-                car_info["distinctive_features"].append("spoiler")
-            elif "alloy wheels" in desc and "alloy wheels" not in car_info["distinctive_features"]:
-                car_info["distinctive_features"].append("alloy wheels")
-            elif ("two door" in desc or "2 door" in desc or "2-door" in desc) and "2 doors" not in car_info["distinctive_features"]:
-                car_info["distinctive_features"].append("2 doors")
-            elif ("four door" in desc or "4 door" in desc or "4-door" in desc) and "4 doors" not in car_info["distinctive_features"]:
-                car_info["distinctive_features"].append("4 doors")
-    
-    for label in labels:
-        desc = label.description.lower()
-        if car_info["brand"] is not None:
-            brand = car_info["brand"].lower()
-            if brand == "toyota" and any(x in desc for x in ["corolla", "camry", "rav4", "prius"]):
-                for model in ["Corolla", "Camry", "RAV4", "Prius"]:
-                    if model.lower() in desc:
-                        car_info["model"] = model
-                        break
-            elif brand == "honda" and any(x in desc for x in ["civic", "accord", "cr-v"]):
-                for model in ["Civic", "Accord", "CR-V"]:
-                    if model.lower() in desc:
-                        car_info["model"] = model
-                        break
-    
-    if car_info["type"] is None:
-        car_info["type"] = "Car"
-    
-    search_terms = generate_search_terms(car_info)
-    car_info["search_terms"] = search_terms
-    
-    return car_info
-
-def generate_search_terms(car_info):
-    search_terms = []
-    
-    main_term = ""
-    if car_info["brand"] is not None:
-        main_term += car_info["brand"] + " "
-    if car_info["model"] is not None:
-        main_term += car_info["model"] + " "
-    elif car_info["type"] is not None:
-        main_term += car_info["type"] + " "
-    if car_info["color"] is not None:
-        main_term += car_info["color"]
-    
-    if main_term.strip():
-        search_terms.append(main_term.strip())
-    else:
-        search_terms.append("car")
-    
-    alt_term = ""
-    if car_info["type"] is not None:
-        alt_term += car_info["type"] + " "
-    if car_info["style"] is not None:
-        alt_term += car_info["style"] + " "
-    if car_info["distinctive_features"]:
-        features = car_info["distinctive_features"][:2]
-        alt_term += " ".join(features)
-    
-    if alt_term.strip() and alt_term.strip() != search_terms[0]:
-        search_terms.append(alt_term.strip())
-    
-    specific_term = ""
-    if car_info["brand"] is not None:
-        specific_term += car_info["brand"] + " "
-    if car_info["model"] is not None:
-        specific_term += car_info["model"] + " "
-    elif car_info["type"] is not None:
-        specific_term += car_info["type"] + " "
-    
-    if specific_term.strip() and specific_term.strip() != search_terms[0]:
-        specific_term += "similar cars"
-        search_terms.append(specific_term.strip())
-    
-    if not search_terms:
-        search_terms.append("car")
-    
-    return search_terms
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CREDENTIALS_PATH
 
 app = FastAPI()
+client = vision.ImageAnnotatorClient()
 
-@app.post("/describe-car-image/")
-async def describe_image(file: UploadFile = File(...)):
-    try:
-        contents = await file.read()
-        image = vision.Image(content=contents)
+COLORS_RGB = {
+    "red": (255, 0, 0),
+    "green": (0, 128, 0),
+    "blue": (0, 0, 255),
+    "black": (0, 0, 0),
+    "white": (255, 255, 255),
+    "gray": (128, 128, 128),
+    "silver": (192, 192, 192),
+    "maroon": (128, 0, 0),
+    "purple": (128, 0, 128),
+    "fuchsia": (255, 0, 255),
+    "lime": (0, 255, 0),
+    "olive": (128, 128, 0),
+    "yellow": (255, 255, 0),
+    "navy": (0, 0, 128),
+    "teal": (0, 128, 128),
+    "aqua": (0, 255, 255),
+    "orange": (255, 165, 0),
+    "brown": (165, 42, 42),
+    "pink": (255, 192, 203),
+    "gold": (255, 215, 0)
+}
 
-        label_response = client.label_detection(image=image, max_results=15)
-        object_response = client.object_localization(image=image)
-        
-        logo_response = client.logo_detection(image=image)
-        
-        all_labels = list(label_response.label_annotations)
-        for logo in logo_response.logo_annotations:
-            fake_label = vision.EntityAnnotation(
-                description=logo.description,
-                score=logo.score
-            )
-            all_labels.append(fake_label)
+CAR_TYPES = {
+    "compact": ["compact", "small car", "compact car", "hatchback"],
+    "sedan": ["sedan", "saloon", "4-door", "four-door"],
+    "suv": ["suv", "sport utility vehicle", "crossover", "crossover suv", "cuv"],
+    "truck": ["truck", "pickup", "pickup truck"],
+    "coupe": ["coupe", "2-door", "two-door", "sports car"],
+    "minivan": ["minivan", "van", "mpv", "multi-purpose vehicle"],
+    "convertible": ["convertible", "cabriolet", "roadster", "open top"],
+    "wagon": ["wagon", "estate car", "station wagon"],
+    "luxury": ["luxury", "premium", "executive"],
+    "electric": ["electric", "ev", "bev", "battery electric vehicle"],
+    "hybrid": ["hybrid", "phev", "plug-in hybrid", "mild hybrid"]
+}
 
-        car_info = extract_car_features(
-            all_labels,
-            object_response.localized_object_annotations
-        )
+def get_color_name(rgb):
+    return find_nearest_color(rgb)
 
-        return JSONResponse(content=car_info)
+def find_nearest_color(rgb_triplet):
+    min_difference = None
+    nearest_name = None
+    for name, rgb_std in COLORS_RGB.items():
+        difference = sum(abs(c1 - c2) for c1, c2 in zip(rgb_triplet, rgb_std))
+        if min_difference is None or difference < min_difference:
+            min_difference = difference
+            nearest_name = name
+    return nearest_name
+
+def extract_car_year(labels_and_detections):
+    """
+    Extracts a possible car year from a list of labels and detections.
+    Validates that the year is between the first car (1886) and the current year.
+    """
+    current_year = datetime.now().year
+    possible_years = []
     
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+    for text in labels_and_detections:
+        numbers = re.findall(r'\b(1[89]\d\d|20\d\d)\b', text)
+        possible_years.extend([int(num) for num in numbers])
+    
+    print("possible_years")
+    print(possible_years)
+    
+    valid_years = [year for year in possible_years if 1886 <= year <= current_year]
+    
+    
+    if valid_years:
+        return max(valid_years)
+    return None
+
+def identify_car_type(labels_and_detections):
+    """
+    Identifies car type from labels and detections using predefined car type categories.
+    Returns the most likely car type based on matches.
+    """
+    type_matches = {}
+    
+    lowercase_detections = [text.lower() for text in labels_and_detections]
+    
+    for car_type, keywords in CAR_TYPES.items():
+        matches = 0
+        for keyword in keywords:
+            for detection in lowercase_detections:
+                if keyword in detection:
+                    matches += 1
+        
+        if matches > 0:
+            type_matches[car_type] = matches
+    
+    if type_matches:
+        return max(type_matches.items(), key=lambda x: x[1])[0]
+    return None
+
+@app.post("/analyze-car/")
+async def analyze_car(file: UploadFile = File(...)):
+
+    content = await file.read()
+    image = vision.Image(content=content)
+
+    response = client.annotate_image({
+        'image': image,
+        'features': [
+            {'type_': vision.Feature.Type.LABEL_DETECTION},
+            {'type_': vision.Feature.Type.OBJECT_LOCALIZATION},
+            {'type_': vision.Feature.Type.TEXT_DETECTION},
+            {'type_': vision.Feature.Type.WEB_DETECTION},
+            {'type_': vision.Feature.Type.IMAGE_PROPERTIES},
+        ],
+    })
+
+    labels = [label.description for label in response.label_annotations]
+    web_detections = [
+        entity.description for entity in response.web_detection.web_entities
+        if entity.description
+    ]
+
+    array_labels_and_web_detections = labels + web_detections
+    
+    car_year = extract_car_year(array_labels_and_web_detections)
+    
+    car_type = identify_car_type(array_labels_and_web_detections)
+
+    colors = sorted(
+        response.image_properties_annotation.dominant_colors.colors,
+        key=lambda c: c.score,
+        reverse=True
+    )
+    dominant_color = {
+        "r": int(colors[0].color.red),
+        "g": int(colors[0].color.green),
+        "b": int(colors[0].color.blue)
+    } if colors else None
+
+    brands_models = marcas_modelos_data
+
+    brand = None
+    model = None
+
+    for brand_name, models in brands_models.items():
+        if any(brand_name.lower() in val.lower() for val in array_labels_and_web_detections):
+            brand = brand_name
+            
+            sorted_models = sorted(models, key=lambda x: len(x.split()), reverse=True)
+            for model_name in sorted_models:
+                if any(model_name.lower() in val.lower() for val in array_labels_and_web_detections):
+                    model = model_name
+                    break
+            
+            if model is None:
+                for label in array_labels_and_web_detections:
+                    label_lower = label.lower()
+                    if brand_name.lower() in label_lower:
+                        possible_model = label_lower.replace(brand_name.lower(), "").strip()
+                        best_match = None
+                        best_match_score = 0
+                        for model_name in models:
+                            model_lower = model_name.lower()
+                            if model_lower in possible_model:
+                                if len(model_lower) > best_match_score:
+                                    best_match = model_name
+                                    best_match_score = len(model_lower)
+                        if best_match:
+                            model = best_match
+                            break
+            break
+
+    color_name = get_color_name((dominant_color["r"], dominant_color["g"], dominant_color["b"]))
+    
+    return {
+        "brand": brand,
+        "model": model,
+        "year": car_year,
+        "type": car_type,
+        "color": dominant_color,
+        "color_name": color_name
+    }
+
+
+@app.post("/general-car-description/")
+async def general_car_description(file: UploadFile = File(...)):
+    content = await file.read()
+    image = vision.Image(content=content)
+
+    response = client.annotate_image({
+        'image': image,
+        'features': [
+            {'type_': vision.Feature.Type.LABEL_DETECTION},
+            {'type_': vision.Feature.Type.OBJECT_LOCALIZATION},
+            {'type_': vision.Feature.Type.TEXT_DETECTION},
+            {'type_': vision.Feature.Type.WEB_DETECTION},
+            {'type_': vision.Feature.Type.IMAGE_PROPERTIES},
+        ],
+    })
+
+    results = {
+        "labels": [label.description for label in response.label_annotations],
+        "objects": [
+            {"name": obj.name, "score": obj.score}
+            for obj in response.localized_object_annotations
+        ],
+        "text": response.text_annotations[0].description if response.text_annotations else "",
+        "colors": [
+            {
+                "color": {
+                    "r": color.color.red,
+                    "g": color.color.green,
+                    "b": color.color.blue
+                },
+                "score": color.score
+            }
+            for color in response.image_properties_annotation.dominant_colors.colors
+        ],
+        "web_detections": [
+            entity.description for entity in response.web_detection.web_entities
+            if entity.description
+        ]
+    }
+
+    return results
